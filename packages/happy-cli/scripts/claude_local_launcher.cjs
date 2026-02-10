@@ -1,7 +1,9 @@
 const fs = require('fs');
+const { ensureWindowsUtf8Env } = require('./claude_version_utils.cjs');
 
 // Disable autoupdater (never works really)
 process.env.DISABLE_AUTOUPDATER = '1';
+Object.assign(process.env, ensureWindowsUtf8Env(process.env));
 
 // Helper to write JSON messages to fd 3
 function writeMessage(message) {
@@ -68,6 +70,7 @@ Object.defineProperty(global.fetch, 'name', { value: 'fetch' });
 Object.defineProperty(global.fetch, 'length', { value: originalFetch.length });
 
 // Import global Claude Code CLI
-const { getClaudeCliPath, runClaudeCli } = require('./claude_version_utils.cjs');
+const { getClaudeCliPath, runClaudeCli, startWindowsUtf8CodePageGuard } = require('./claude_version_utils.cjs');
 
+startWindowsUtf8CodePageGuard();
 runClaudeCli(getClaudeCliPath());

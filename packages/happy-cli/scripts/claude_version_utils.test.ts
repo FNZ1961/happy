@@ -1,5 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { createRequire } from 'node:module';
 import {
   findGlobalClaudeCliPath,
   findClaudeInPath,
@@ -9,7 +12,12 @@ import {
   findHomebrewCliPath,
   findNativeInstallerCliPath,
   getVersion,
-  compareVersions
+  compareVersions,
+  preferWindowsCliJsPath,
+  ensureWindowsUtf8Env,
+  runClaudeCli,
+  findWindowsGitBashPath,
+  startWindowsUtf8CodePageGuard
 } from '../scripts/claude_version_utils.cjs';
 
 describe('Claude Version Utils - Cross-Platform Detection', () => {
@@ -212,7 +220,7 @@ describe('Claude Version Utils - Cross-Platform Detection', () => {
 
       unixPaths.forEach(path => {
         const result = detectSourceFromPath(path);
-        expect(['Homebrew', 'native installer']).toContain(result);
+        expect(['Homebrew', 'native installer', 'PATH']).toContain(result);
       });
     });
   });
@@ -335,6 +343,210 @@ describe('Claude Version Utils - Cross-Platform Detection', () => {
         expect(result).toBe(expected);
       });
     });
+  });
+});
+
+describe('Windows helpers', () => {
+  const originalPlatform = process.platform;
+
+  afterEach(() => {
+    Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true });
+  });
+
+  it('findWindowsGitBashPath should use explicit env path when it exists', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gitbash-explicit-'));
+    try {
+      const bashPath = path.join(tmpRoot, 'Git', 'bin', 'bash.exe');
+      fs.mkdirSync(path.dirname(bashPath), { recursive: true });
+      fs.writeFileSync(bashPath, 'mock');
+
+      const env = {
+        CLAUDE_CODE_GIT_BASH_PATH: bashPath
+      } as NodeJS.ProcessEnv;
+
+      expect(findWindowsGitBashPath(env)).toBe(path.normalize(bashPath));
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('findWindowsGitBashPath should ignore non-Git env path and allow fallback detection', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gitbash-reject-'));
+    try {
+      const fakeBashPath = path.join(tmpRoot, 'Tools', 'bash.exe');
+      fs.mkdirSync(path.dirname(fakeBashPath), { recursive: true });
+      fs.writeFileSync(fakeBashPath, 'mock');
+
+      const env = {
+        CLAUDE_CODE_GIT_BASH_PATH: fakeBashPath
+      } as NodeJS.ProcessEnv;
+
+      const detectedPath = findWindowsGitBashPath(env);
+      expect(detectedPath).not.toBe(path.normalize(fakeBashPath));
+
+      if (detectedPath !== null) {
+        const lowerPath = detectedPath.toLowerCase();
+        expect(lowerPath).toContain(`${path.sep}git${path.sep}`);
+        expect(lowerPath.endsWith('bash.exe')).toBe(true);
+      }
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('ensureWindowsUtf8Env should auto-detect Git Bash from ProgramFiles', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gitbash-auto-'));
+    try {
+      const bashPath = path.join(tmpRoot, 'Git', 'bin', 'bash.exe');
+      fs.mkdirSync(path.dirname(bashPath), { recursive: true });
+      fs.writeFileSync(bashPath, 'mock');
+
+      const env = {
+        ProgramFiles: tmpRoot
+      } as NodeJS.ProcessEnv;
+
+      const next = ensureWindowsUtf8Env(env);
+      expect(next.CLAUDE_CODE_GIT_BASH_PATH).toBe(path.normalize(bashPath));
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('ensureWindowsUtf8Env should return a new env object', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+
+    const env = {
+      TEST_ONLY: '1'
+    } as NodeJS.ProcessEnv;
+
+    const next = ensureWindowsUtf8Env(env);
+    expect(next).not.toBe(env);
+    expect(env.LANG).toBeUndefined();
+    expect(env.LC_ALL).toBeUndefined();
+    expect(next.TEST_ONLY).toBe('1');
+  });
+
+  it('ensureWindowsUtf8Env should set UTF-8 locale defaults when absent', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+
+    const env = {
+      TEST_ONLY: '1'
+    } as NodeJS.ProcessEnv;
+
+    const next = ensureWindowsUtf8Env(env);
+    expect(next.LANG).toBe('C.UTF-8');
+    expect(next.LC_ALL).toBe('C.UTF-8');
+  });
+
+  it('preferWindowsCliJsPath should keep js path unchanged', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    const p = 'C:/Users/test/AppData/Local/Claude/cli.js';
+    expect(preferWindowsCliJsPath(p)).toBe(p);
+  });
+
+  it('preferWindowsCliJsPath should keep extensionless path when no sibling cli.js', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    const p = 'C:/Users/test/.local/share/claude/versions/2.1.37';
+    expect(preferWindowsCliJsPath(p)).toBe(p);
+  });
+
+  it('preferWindowsCliJsPath should prefer sibling cli.js for extensionless binary path', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-pref-'));
+    try {
+      const binaryPath = path.join(tmpDir, '2.1.37');
+      const siblingCliPath = path.join(tmpDir, 'cli.js');
+      fs.writeFileSync(binaryPath, Buffer.from('MZtest-binary'));
+      fs.writeFileSync(siblingCliPath, 'module.exports = {}');
+
+      expect(preferWindowsCliJsPath(binaryPath)).toBe(siblingCliPath);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('ensureWindowsUtf8Env should preserve existing variables', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+
+    const env = {
+      LANG: 'en_US.UTF-8',
+      LC_ALL: 'en_US.UTF-8',
+      TEST_ONLY: '1'
+    } as NodeJS.ProcessEnv;
+
+    const next = ensureWindowsUtf8Env(env);
+    expect(next.LANG).toBe('en_US.UTF-8');
+    expect(next.LC_ALL).toBe('en_US.UTF-8');
+    expect(next.TEST_ONLY).toBe('1');
+    expect(next).not.toBe(env);
+  });
+
+  it('startWindowsUtf8CodePageGuard should be a no-op on non-Windows', () => {
+    Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
+
+    const stop = startWindowsUtf8CodePageGuard();
+    expect(typeof stop).toBe('function');
+    expect(() => stop()).not.toThrow();
+  });
+});
+
+describe('runClaudeCli binary execution', () => {
+  const originalPlatform = process.platform;
+  const originalArgv = process.argv.slice();
+
+  afterEach(() => {
+    Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true });
+    process.argv = originalArgv.slice();
+    vi.restoreAllMocks();
+  });
+
+  it('should spawn extensionless Windows binary directly (not via node)', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    process.argv = ['node', 'launcher.cjs', '--print', 'hello'];
+
+    const require = createRequire(import.meta.url);
+    const childProcessModule = require('child_process');
+    const on = vi.fn();
+    const spawnSpy = vi.spyOn(childProcessModule, 'spawn').mockReturnValue({ on });
+
+    const binaryPath = 'C:/Users/test/.local/share/claude/versions/2.1.37';
+    runClaudeCli(binaryPath);
+
+    expect(spawnSpy).toHaveBeenCalledTimes(1);
+    expect(spawnSpy).toHaveBeenCalledWith(
+      binaryPath,
+      ['--print', 'hello'],
+      expect.objectContaining({ stdio: 'inherit' })
+    );
+    expect(spawnSpy.mock.calls[0]?.[0]).not.toBe(process.execPath);
+  });
+
+  it('should spawn .exe directly on Windows', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    process.argv = ['node', 'launcher.cjs', '--version'];
+
+    const require = createRequire(import.meta.url);
+    const childProcessModule = require('child_process');
+    const on = vi.fn();
+    const spawnSpy = vi.spyOn(childProcessModule, 'spawn').mockReturnValue({ on });
+
+    const exePath = 'C:/Program Files/Claude/claude.exe';
+    runClaudeCli(exePath);
+
+    expect(spawnSpy).toHaveBeenCalledTimes(1);
+    expect(spawnSpy).toHaveBeenCalledWith(
+      exePath,
+      ['--version'],
+      expect.objectContaining({ stdio: 'inherit' })
+    );
+    expect(spawnSpy.mock.calls[0]?.[0]).toBe(exePath);
   });
 });
 

@@ -17,6 +17,57 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
+const EXEC_SYNC_TIMEOUT_MS = 5000;
+const WINDOWS_UTF8_GUARD_INTERVAL_MS = 1500;
+let windowsUtf8GuardInterval = null;
+
+/**
+ * Force active Windows console code page to UTF-8 (65001).
+ */
+function setWindowsUtf8CodePage() {
+    if (process.platform !== 'win32') return;
+    try {
+        execSync('chcp 65001 >NUL', {
+            stdio: ['pipe', 'pipe', 'pipe'],
+            shell: process.env.ComSpec || 'cmd.exe',
+            timeout: EXEC_SYNC_TIMEOUT_MS
+        });
+    } catch (e) {
+        // Ignore if code page change is not allowed
+    }
+}
+
+/**
+ * Keep Windows console code page pinned to UTF-8 while interactive TTY is active.
+ * @returns {() => void} Stop function
+ */
+function startWindowsUtf8CodePageGuard() {
+    if (process.platform !== 'win32') return () => {};
+    if (!process.stdin.isTTY || !process.stdout.isTTY) return () => {};
+    if (windowsUtf8GuardInterval) {
+        return () => {
+            if (windowsUtf8GuardInterval) {
+                clearInterval(windowsUtf8GuardInterval);
+                windowsUtf8GuardInterval = null;
+            }
+        };
+    }
+
+    windowsUtf8GuardInterval = setInterval(() => {
+        setWindowsUtf8CodePage();
+    }, WINDOWS_UTF8_GUARD_INTERVAL_MS);
+
+    if (typeof windowsUtf8GuardInterval.unref === 'function') {
+        windowsUtf8GuardInterval.unref();
+    }
+
+    return () => {
+        if (!windowsUtf8GuardInterval) return;
+        clearInterval(windowsUtf8GuardInterval);
+        windowsUtf8GuardInterval = null;
+    };
+}
+
 /**
  * Safely resolve symlink or return path if it exists
  * @param {string} filePath - Path to resolve
@@ -33,12 +84,168 @@ function resolvePathSafe(filePath) {
 }
 
 /**
+ * On Windows, prefer cli.js when a sibling exists next to an .exe path.
+ * @param {string} candidatePath - Candidate executable path
+ * @returns {string} Preferred path (cli.js on Windows when available, else original)
+ */
+function preferWindowsCliJsPath(candidatePath) {
+    if (process.platform !== 'win32') return candidatePath;
+    if (!candidatePath) return candidatePath;
+
+    const normalized = candidatePath.toLowerCase();
+    const looksLikeBinary = normalized.endsWith('.exe') || (!normalized.endsWith('.js') && !normalized.endsWith('.cjs'));
+    if (!looksLikeBinary) return candidatePath;
+
+    const siblingCliPath = path.join(path.dirname(candidatePath), 'cli.js');
+    if (fs.existsSync(siblingCliPath)) {
+        return siblingCliPath;
+    }
+
+    return candidatePath;
+}
+
+/**
+ * Detect a valid Git Bash executable path on Windows.
+ * @param {NodeJS.ProcessEnv} baseEnv - Base environment variables
+ * @returns {string|null} Normalized Git Bash path or null
+ */
+function findWindowsGitBashPath(baseEnv = process.env) {
+    if (process.platform !== 'win32') return null;
+
+    const normalizeGitBashPath = (candidatePath) => {
+        if (!candidatePath) return null;
+        const normalizedPath = path.normalize(candidatePath);
+        const lowerPath = normalizedPath.toLowerCase();
+        if (!lowerPath.endsWith('bash.exe')) return null;
+        if (!lowerPath.includes(`${path.sep}git${path.sep}`)) return null;
+        return normalizedPath;
+    };
+
+    const candidates = [];
+    const addCandidate = (candidatePath) => {
+        const normalizedPath = normalizeGitBashPath(candidatePath);
+        if (!normalizedPath) return;
+        if (!candidates.includes(normalizedPath)) {
+            candidates.push(normalizedPath);
+        }
+    };
+
+    // 1) Respect existing env var first
+    if (baseEnv.CLAUDE_CODE_GIT_BASH_PATH) {
+        const existingPath = normalizeGitBashPath(baseEnv.CLAUDE_CODE_GIT_BASH_PATH);
+        if (existingPath && fs.existsSync(existingPath)) {
+            return existingPath;
+        }
+    }
+
+    // 2) Common installation roots
+    const candidateRoots = [
+        baseEnv.ProgramFiles,
+        baseEnv.ProgramW6432,
+        baseEnv['ProgramFiles(x86)'],
+        baseEnv.LOCALAPPDATA ? path.join(baseEnv.LOCALAPPDATA, 'Programs') : null
+    ];
+
+    for (const root of candidateRoots) {
+        if (!root) continue;
+        addCandidate(path.join(root, 'Git', 'bin', 'bash.exe'));
+        addCandidate(path.join(root, 'Git', 'usr', 'bin', 'bash.exe'));
+    }
+
+    for (const candidate of candidates) {
+        if (fs.existsSync(candidate)) return candidate;
+    }
+
+    // 3) Derive from where git
+    try {
+        const gitPaths = execSync('where git', {
+            encoding: 'utf8',
+            stdio: ['pipe', 'pipe', 'pipe'],
+            timeout: EXEC_SYNC_TIMEOUT_MS
+        }).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+
+        for (const gitPath of gitPaths) {
+            const lowerGitPath = gitPath.toLowerCase();
+            let gitRoot = null;
+
+            if (lowerGitPath.endsWith('\\cmd\\git.exe')) {
+                gitRoot = path.dirname(path.dirname(gitPath));
+            } else if (lowerGitPath.endsWith('\\mingw64\\bin\\git.exe')) {
+                gitRoot = path.dirname(path.dirname(path.dirname(gitPath)));
+            } else {
+                gitRoot = path.dirname(path.dirname(gitPath));
+            }
+
+            addCandidate(path.join(gitRoot, 'bin', 'bash.exe'));
+            addCandidate(path.join(gitRoot, 'usr', 'bin', 'bash.exe'));
+        }
+    } catch (e) {
+        // git not available
+    }
+
+    // 4) Derive from where bash (prefer Git Bash paths only)
+    try {
+        const bashPaths = execSync('where bash', {
+            encoding: 'utf8',
+            stdio: ['pipe', 'pipe', 'pipe'],
+            timeout: EXEC_SYNC_TIMEOUT_MS
+        }).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+
+        for (const bashPath of bashPaths) {
+            addCandidate(bashPath);
+        }
+    } catch (e) {
+        // bash not available
+    }
+
+    for (const candidate of candidates) {
+        if (fs.existsSync(candidate)) return candidate;
+    }
+
+    return null;
+}
+
+/**
+ * Ensure UTF-8 console and locale environment on Windows.
+ * @param {NodeJS.ProcessEnv} baseEnv - Base environment variables
+ * @returns {NodeJS.ProcessEnv} Environment with UTF-8 locale hints on Windows
+ */
+function ensureWindowsUtf8Env(baseEnv) {
+    const env = { ...baseEnv };
+    if (process.platform !== 'win32') return env;
+
+    // Ensure UTF-8 code page for current interactive console.
+    setWindowsUtf8CodePage();
+
+    if (!env.LANG) env.LANG = 'C.UTF-8';
+    if (!env.LC_ALL) env.LC_ALL = 'C.UTF-8';
+
+    if (env.CLAUDE_CODE_GIT_BASH_PATH) {
+        const normalizedBashPath = path.normalize(env.CLAUDE_CODE_GIT_BASH_PATH);
+        if (fs.existsSync(normalizedBashPath)) {
+            env.CLAUDE_CODE_GIT_BASH_PATH = normalizedBashPath;
+        }
+    } else {
+        const detectedBashPath = findWindowsGitBashPath(env);
+        if (detectedBashPath) {
+            env.CLAUDE_CODE_GIT_BASH_PATH = detectedBashPath;
+        }
+    }
+
+    return env;
+}
+
+/**
  * Find path to npm globally installed Claude Code CLI
  * @returns {string|null} Path to cli.js or null if not found
  */
 function findNpmGlobalCliPath() {
     try {
-        const globalRoot = execSync('npm root -g', { encoding: 'utf8' }).trim();
+        const globalRoot = execSync('npm root -g', {
+            encoding: 'utf8',
+            stdio: ['pipe', 'pipe', 'pipe'],
+            timeout: EXEC_SYNC_TIMEOUT_MS
+        }).trim();
         const globalCliPath = path.join(globalRoot, '@anthropic-ai', 'claude-code', 'cli.js');
         if (fs.existsSync(globalCliPath)) {
             return globalCliPath;
@@ -61,7 +268,8 @@ function findClaudeInPath() {
         // stdio suppression for cleaner execution (from tiann/PR#83)
         const result = execSync(command, {
             encoding: 'utf8',
-            stdio: ['pipe', 'pipe', 'pipe']
+            stdio: ['pipe', 'pipe', 'pipe'],
+            timeout: EXEC_SYNC_TIMEOUT_MS
         }).trim();
 
         const claudePath = result.split('\n')[0].trim(); // Take first match
@@ -72,20 +280,21 @@ function findClaudeInPath() {
 
         // Resolve with fallback to original path (from tiann/PR#83)
         const resolvedPath = resolvePathSafe(claudePath) || claudePath;
+        const preferredPath = preferWindowsCliJsPath(resolvedPath);
 
-        if (resolvedPath) {
+        if (preferredPath) {
             // Detect source from BOTH original PATH entry and resolved path
             // Original path tells us HOW user accessed it (context)
             // Resolved path tells us WHERE it actually lives (content)
             const originalSource = detectSourceFromPath(claudePath);
-            const resolvedSource = detectSourceFromPath(resolvedPath);
+            const resolvedSource = detectSourceFromPath(preferredPath);
 
             // Prioritize original PATH entry for context (e.g., bun vs npm access)
             // Fall back to resolved path for accurate location detection
             const source = originalSource !== 'PATH' ? originalSource : resolvedSource;
 
             return {
-                path: resolvedPath,
+                path: preferredPath,
                 source: source
             };
         }
@@ -102,11 +311,8 @@ function findClaudeInPath() {
  * @returns {string} Installation method/source
  */
 function detectSourceFromPath(resolvedPath) {
-    const normalized = resolvedPath.toLowerCase();
-    const path = require('path');
-
-    // Use path.normalize() for proper cross-platform path handling
-    const normalizedPath = path.normalize(resolvedPath).toLowerCase();
+    // Use path.normalize() with unified separators for cross-platform path checks
+    const normalizedPath = path.normalize(resolvedPath).replace(/\\/g, '/').toLowerCase();
 
     // Bun: ~/.bun/bin/claude -> ../node_modules/@anthropic-ai/claude-code/cli.js
     // Works on Windows too: C:\Users\[user]\.bun\bin\claude
@@ -129,7 +335,7 @@ function detectSourceFromPath(resolvedPath) {
     }
 
     // Windows-specific detection (detect by path patterns, not current platform)
-    if (normalizedPath.includes('appdata') || normalizedPath.includes('program files') || normalizedPath.endsWith('.exe')) {
+    if (normalizedPath.includes('appdata') || normalizedPath.includes('program files') || normalizedPath.includes('/.claude/') || normalizedPath.endsWith('.exe')) {
         // Windows npm
         if (normalizedPath.includes('appdata') && normalizedPath.includes('npm') && normalizedPath.includes('node_modules')) {
             return 'npm';
@@ -137,6 +343,11 @@ function detectSourceFromPath(resolvedPath) {
 
         // Windows native installer (any location ending with claude.exe)
         if (normalizedPath.endsWith('claude.exe')) {
+            return 'native installer';
+        }
+
+        // Windows native installer cli.js under %USERPROFILE%/.claude/
+        if (normalizedPath.includes('/.claude/') && normalizedPath.endsWith('/cli.js')) {
             return 'native installer';
         }
 
@@ -187,7 +398,11 @@ function findBunGlobalCliPath() {
     // First check if bun command exists (cross-platform)
     try {
         const bunCheckCommand = process.platform === 'win32' ? 'where bun' : 'which bun';
-        execSync(bunCheckCommand, { encoding: 'utf8' });
+        execSync(bunCheckCommand, {
+            encoding: 'utf8',
+            stdio: ['pipe', 'pipe', 'pipe'],
+            timeout: EXEC_SYNC_TIMEOUT_MS
+        });
     } catch (e) {
         return null; // bun not installed
     }
@@ -259,43 +474,48 @@ function findHomebrewCliPath() {
  */
 function findNativeInstallerCliPath() {
     const homeDir = os.homedir();
-    
+
     // Windows-specific locations
     if (process.platform === 'win32') {
         const localAppData = process.env.LOCALAPPDATA || path.join(homeDir, 'AppData', 'Local');
-        
+
         // Check %LOCALAPPDATA%\Claude\
         const windowsClaudePath = path.join(localAppData, 'Claude');
         if (fs.existsSync(windowsClaudePath)) {
+            // Check for cli.js directly first
+            const cliPath = path.join(windowsClaudePath, 'cli.js');
+            if (fs.existsSync(cliPath)) {
+                return cliPath;
+            }
+
             // Check for versions directory
             const versionsDir = path.join(windowsClaudePath, 'versions');
             if (fs.existsSync(versionsDir)) {
                 const found = findLatestVersionBinary(versionsDir);
                 if (found) return found;
             }
-            
-            // Check for claude.exe directly
+
+            // Check for claude.exe directly (fallback)
             const exePath = path.join(windowsClaudePath, 'claude.exe');
             if (fs.existsSync(exePath)) {
                 return exePath;
             }
-            
-            // Check for cli.js
-            const cliPath = path.join(windowsClaudePath, 'cli.js');
-            if (fs.existsSync(cliPath)) {
-                return cliPath;
-            }
         }
-        
+
         // Check %USERPROFILE%\.claude\ (alternative Windows location)
         const dotClaudePath = path.join(homeDir, '.claude');
         if (fs.existsSync(dotClaudePath)) {
+            const cliPath = path.join(dotClaudePath, 'cli.js');
+            if (fs.existsSync(cliPath)) {
+                return cliPath;
+            }
+
             const versionsDir = path.join(dotClaudePath, 'versions');
             if (fs.existsSync(versionsDir)) {
                 const found = findLatestVersionBinary(versionsDir);
                 if (found) return found;
             }
-            
+
             const exePath = path.join(dotClaudePath, 'claude.exe');
             if (fs.existsSync(exePath)) {
                 return exePath;
@@ -362,14 +582,14 @@ function findLatestVersionBinary(versionsDir, binaryName = null) {
                     return binaryPath;
                 }
             }
-            // Check for executable or cli.js inside directory
-            const exePath = path.join(versionPath, process.platform === 'win32' ? 'claude.exe' : 'claude');
-            if (fs.existsSync(exePath)) {
-                return exePath;
-            }
+            // On Windows, prefer cli.js first for better UTF-8 behavior.
             const cliPath = path.join(versionPath, 'cli.js');
             if (fs.existsSync(cliPath)) {
                 return cliPath;
+            }
+            const exePath = path.join(versionPath, process.platform === 'win32' ? 'claude.exe' : 'claude');
+            if (fs.existsSync(exePath)) {
+                return exePath;
             }
         }
     } catch (e) {
@@ -391,7 +611,24 @@ function findGlobalClaudeCliPath() {
         return { path: resolved, source: 'HAPPY_CLAUDE_PATH' };
     }
 
-    // 2. Check PATH (respects user's shell config)
+    // 2. On Windows, prefer discoverers that can return cli.js before PATH fallback.
+    if (process.platform === 'win32') {
+        const npmPath = findNpmGlobalCliPath();
+        if (npmPath) return { path: npmPath, source: 'npm' };
+
+        const bunPath = findBunGlobalCliPath();
+        if (bunPath) return { path: bunPath, source: 'Bun' };
+
+        const nativePath = findNativeInstallerCliPath();
+        if (nativePath) return { path: nativePath, source: 'native installer' };
+
+        const pathResult = findClaudeInPath();
+        if (pathResult) return pathResult;
+
+        return null;
+    }
+
+    // 2. Non-Windows: keep existing priority
     const pathResult = findClaudeInPath();
     if (pathResult) return pathResult;
 
@@ -480,27 +717,32 @@ function getClaudeCliPath() {
 function runClaudeCli(cliPath) {
     const { pathToFileURL } = require('url');
     const { spawn } = require('child_process');
-    
+
     // Check if it's a JavaScript file (.js or .cjs) or a binary file
     const isJsFile = cliPath.endsWith('.js') || cliPath.endsWith('.cjs');
+    const env = ensureWindowsUtf8Env(process.env);
 
     if (isJsFile) {
         // JavaScript file - use import to keep interceptors working
         const importUrl = pathToFileURL(cliPath).href;
         import(importUrl);
-    } else {
-        // Binary file (e.g., Homebrew installation) - spawn directly
-        // Note: Interceptors won't work with binary files, but that's acceptable
-        // as binary files are self-contained and don't need interception
-        const args = process.argv.slice(2);
-        const child = spawn(cliPath, args, {
-            stdio: 'inherit',
-            env: process.env
-        });
-        child.on('exit', (code) => {
-            process.exit(code || 0);
-        });
+        return;
     }
+
+    // Binary file (e.g., Homebrew/native installer) - spawn directly.
+    // Do not run native binaries through node.exe on Windows.
+    const args = process.argv.slice(2);
+    const child = spawn(cliPath, args, {
+        stdio: 'inherit',
+        env
+    });
+    child.on('error', (error) => {
+        console.error(`Failed to launch Claude CLI at ${cliPath}: ${error.message}`);
+        process.exit(1);
+    });
+    child.on('exit', (code) => {
+        process.exit(code || 0);
+    });
 }
 
 module.exports = {
@@ -514,6 +756,11 @@ module.exports = {
     getVersion,
     compareVersions,
     getClaudeCliPath,
-    runClaudeCli
+    runClaudeCli,
+    preferWindowsCliJsPath,
+    ensureWindowsUtf8Env,
+    findWindowsGitBashPath,
+    setWindowsUtf8CodePage,
+    startWindowsUtf8CodePageGuard,
 };
 
