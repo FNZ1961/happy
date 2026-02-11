@@ -19,14 +19,9 @@ export function useHappyAction(action: () => Promise<void>) {
                         break;
                     } catch (e) {
                         if (e instanceof HappyError) {
-                            // if (e.canTryAgain) {
-                            //     Modal.alert('Error', e.message, [{ text: 'Try again' }, { text: 'Cancel', style: 'cancel' }]) 
-                            //         break;
-                            //     }
-                            // } else {
-                            //     await alert('Error', e.message, [{ text: 'OK', style: 'cancel' }]);
-                            //     break;
-                            // }
+                            Modal.alert('Error', e.message, [{ text: 'OK', style: 'cancel' }]);
+                            break;
+                        } else if (e instanceof Error) {
                             Modal.alert('Error', e.message, [{ text: 'OK', style: 'cancel' }]);
                             break;
                         } else {

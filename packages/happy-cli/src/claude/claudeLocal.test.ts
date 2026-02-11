@@ -229,4 +229,43 @@ describe('claudeLocal --continue handling', () => {
         const spawnArgs = mockSpawn.mock.calls[0][1];
         expect(spawnArgs).toContain('-r');
     });
+
+    it('should restore stdin raw mode on cleanup when stdin is raw', async () => {
+        const prevIsTTY = process.stdin.isTTY;
+        const prevIsRaw = process.stdin.isRaw;
+        const prevSetRawMode = (process.stdin as any).setRawMode;
+        const setRawModeSpy = vi.fn();
+
+        Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true, writable: true });
+        Object.defineProperty(process.stdin, 'isRaw', { value: true, configurable: true, writable: true });
+        Object.defineProperty(process.stdin, 'setRawMode', { value: setRawModeSpy, configurable: true, writable: true });
+
+        try {
+            await claudeLocal({
+                abort: new AbortController().signal,
+                sessionId: null,
+                path: '/tmp',
+                onSessionFound,
+                claudeArgs: []
+            });
+
+            expect(setRawModeSpy).toHaveBeenCalledWith(false);
+        } finally {
+            if (typeof prevIsTTY === 'undefined') {
+                delete (process.stdin as any).isTTY;
+            } else {
+                Object.defineProperty(process.stdin, 'isTTY', { value: prevIsTTY, configurable: true, writable: true });
+            }
+            if (typeof prevIsRaw === 'undefined') {
+                delete (process.stdin as any).isRaw;
+            } else {
+                Object.defineProperty(process.stdin, 'isRaw', { value: prevIsRaw, configurable: true, writable: true });
+            }
+            if (typeof prevSetRawMode === 'undefined') {
+                delete (process.stdin as any).setRawMode;
+            } else {
+                Object.defineProperty(process.stdin, 'setRawMode', { value: prevSetRawMode, configurable: true, writable: true });
+            }
+        }
+    });
 });

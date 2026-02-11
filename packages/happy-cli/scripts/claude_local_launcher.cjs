@@ -1,8 +1,7 @@
 const fs = require('fs');
 const { ensureWindowsUtf8Env } = require('./claude_version_utils.cjs');
 
-// Disable autoupdater (never works really)
-process.env.DISABLE_AUTOUPDATER = '1';
+// Keep Claude Code default updater behavior (can still be overridden by env)
 Object.assign(process.env, ensureWindowsUtf8Env(process.env));
 
 // Helper to write JSON messages to fd 3

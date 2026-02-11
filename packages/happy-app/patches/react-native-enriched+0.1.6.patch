@@ -1,0 +1,23 @@
+diff --git a/node_modules/react-native-enriched/android/src/main/new_arch/CMakeLists.txt b/node_modules/react-native-enriched/android/src/main/new_arch/CMakeLists.txt
+index ab00a41..0bc23df 100644
+--- a/node_modules/react-native-enriched/android/src/main/new_arch/CMakeLists.txt
++++ b/node_modules/react-native-enriched/android/src/main/new_arch/CMakeLists.txt
+@@ -8,8 +8,17 @@ set(LIB_ANDROID_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../..)
+ set(LIB_ANDROID_GENERATED_JNI_DIR ${LIB_ANDROID_DIR}/generated/jni)
+ set(LIB_ANDROID_GENERATED_COMPONENTS_DIR ${LIB_ANDROID_GENERATED_JNI_DIR}/react/renderer/components/${LIB_LITERAL})
+ 
++# Copy codegen sources locally to avoid Windows 260-char path limit with Ninja
++set(_CG_LOCAL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/_cg)
++file(GLOB _CG_ORIG_FILES ${LIB_ANDROID_GENERATED_COMPONENTS_DIR}/*.cpp ${LIB_ANDROID_GENERATED_COMPONENTS_DIR}/*.h)
++file(MAKE_DIRECTORY ${_CG_LOCAL_DIR})
++foreach(_f ${_CG_ORIG_FILES})
++  get_filename_component(_fn ${_f} NAME)
++  configure_file(${_f} ${_CG_LOCAL_DIR}/${_fn} COPYONLY)
++endforeach()
++
+ file(GLOB LIB_MODULE_SRCS CONFIGURE_DEPENDS *.cpp react/renderer/components/${LIB_LITERAL}/*.cpp)
+-file(GLOB LIB_CODEGEN_SRCS CONFIGURE_DEPENDS ${LIB_ANDROID_GENERATED_COMPONENTS_DIR}/*.cpp)
++file(GLOB LIB_CODEGEN_SRCS CONFIGURE_DEPENDS ${_CG_LOCAL_DIR}/*.cpp)
+ 
+ add_library(
+         ${LIB_TARGET_NAME}

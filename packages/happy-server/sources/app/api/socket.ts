@@ -1,6 +1,6 @@
 import { onShutdown } from "@/utils/shutdown";
 import { Fastify } from "./types";
-import { buildMachineActivityEphemeral, ClientConnection, eventRouter } from "@/app/events/eventRouter";
+import { buildMachineActivityEphemeral, buildSessionActivityEphemeral, ClientConnection, eventRouter } from "@/app/events/eventRouter";
 import { Server, Socket } from "socket.io";
 import { log } from "@/utils/log";
 import { auth } from "@/app/auth/auth";
@@ -126,6 +126,16 @@ export function startSocket(app: Fastify) {
                 eventRouter.emitEphemeral({
                     userId,
                     payload: machineActivity,
+                    recipientFilter: { type: 'user-scoped-only' }
+                });
+            }
+
+            // Broadcast session offline status when session-scoped client disconnects
+            if (connection.connectionType === 'session-scoped') {
+                const sessionActivity = buildSessionActivityEphemeral(connection.sessionId, false, Date.now(), false);
+                eventRouter.emitEphemeral({
+                    userId,
+                    payload: sessionActivity,
                     recipientFilter: { type: 'user-scoped-only' }
                 });
             }

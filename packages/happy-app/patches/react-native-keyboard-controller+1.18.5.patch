@@ -1,0 +1,40 @@
+diff --git a/node_modules/react-native-keyboard-controller/android/src/main/jni/CMakeLists.txt b/node_modules/react-native-keyboard-controller/android/src/main/jni/CMakeLists.txt
+index 9cf1a7d..5225509 100644
+--- a/node_modules/react-native-keyboard-controller/android/src/main/jni/CMakeLists.txt
++++ b/node_modules/react-native-keyboard-controller/android/src/main/jni/CMakeLists.txt
+@@ -20,8 +20,24 @@ add_compile_options(
+   -Wno-dollar-in-identifier-extension
+ )
+ 
+-file(GLOB LIB_CUSTOM_SRCS CONFIGURE_DEPENDS *.cpp ${LIB_COMMON_COMPONENTS_DIR}/*.cpp)
+-file(GLOB LIB_CODEGEN_SRCS CONFIGURE_DEPENDS ${LIB_ANDROID_GENERATED_JNI_DIR}/*.cpp ${LIB_ANDROID_GENERATED_COMPONENTS_DIR}/*.cpp)
++# Copy codegen & common sources locally to avoid Windows 260-char path limit with Ninja
++set(_CG_LOCAL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/_cg)
++file(MAKE_DIRECTORY ${_CG_LOCAL_DIR})
++file(GLOB _CG_ORIG_FILES ${LIB_ANDROID_GENERATED_JNI_DIR}/*.cpp ${LIB_ANDROID_GENERATED_JNI_DIR}/*.h ${LIB_ANDROID_GENERATED_COMPONENTS_DIR}/*.cpp ${LIB_ANDROID_GENERATED_COMPONENTS_DIR}/*.h)
++foreach(_f ${_CG_ORIG_FILES})
++  get_filename_component(_fn ${_f} NAME)
++  configure_file(${_f} ${_CG_LOCAL_DIR}/${_fn} COPYONLY)
++endforeach()
++set(_CM_LOCAL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/_cm)
++file(MAKE_DIRECTORY ${_CM_LOCAL_DIR})
++file(GLOB _CM_ORIG_FILES ${LIB_COMMON_COMPONENTS_DIR}/*.cpp ${LIB_COMMON_COMPONENTS_DIR}/*.h)
++foreach(_f ${_CM_ORIG_FILES})
++  get_filename_component(_fn ${_f} NAME)
++  configure_file(${_f} ${_CM_LOCAL_DIR}/${_fn} COPYONLY)
++endforeach()
++
++file(GLOB LIB_CUSTOM_SRCS CONFIGURE_DEPENDS *.cpp ${_CM_LOCAL_DIR}/*.cpp)
++file(GLOB LIB_CODEGEN_SRCS CONFIGURE_DEPENDS ${_CG_LOCAL_DIR}/*.cpp)
+ 
+ add_library(
+   ${LIB_TARGET_NAME}
+@@ -34,6 +50,8 @@ target_include_directories(
+   ${LIB_TARGET_NAME}
+   PUBLIC
+   .
++  ${_CG_LOCAL_DIR}
++  ${_CM_LOCAL_DIR}
+   ${LIB_COMMON_DIR}
+   ${LIB_ANDROID_GENERATED_JNI_DIR}
+   ${LIB_ANDROID_GENERATED_COMPONENTS_DIR}

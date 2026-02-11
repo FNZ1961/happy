@@ -1,0 +1,40 @@
+diff --git a/node_modules/react-native-svg/android/src/main/jni/CMakeLists.txt b/node_modules/react-native-svg/android/src/main/jni/CMakeLists.txt
+index 6f45884..8295c55 100644
+--- a/node_modules/react-native-svg/android/src/main/jni/CMakeLists.txt
++++ b/node_modules/react-native-svg/android/src/main/jni/CMakeLists.txt
+@@ -7,8 +7,24 @@ set(RNSVG_GENERATED_DIR ${RNSVG_ANDROID_DIR}/build/generated)
+ set(RNSVG_GENERATED_JNI_DIR ${RNSVG_GENERATED_DIR}/source/codegen/jni)
+ set(RNSVG_GENERATED_REACT_DIR ${RNSVG_GENERATED_JNI_DIR}/react/renderer/components/rnsvg)
+ 
+-file(GLOB rnsvg_SRCS CONFIGURE_DEPENDS *.cpp ${RNSVG_COMMON_DIR}/react/renderer/components/rnsvg/*.cpp)
+-file(GLOB rnsvg_codegen_SRCS CONFIGURE_DEPENDS ${RNSVG_GENERATED_REACT_DIR}/*cpp)
++# Copy codegen & common sources locally to avoid Windows 260-char path limit with Ninja
++set(_CG_LOCAL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/_cg)
++file(MAKE_DIRECTORY ${_CG_LOCAL_DIR})
++file(GLOB _CG_ORIG_SRCS ${RNSVG_GENERATED_REACT_DIR}/*.cpp ${RNSVG_GENERATED_REACT_DIR}/*.h)
++foreach(_f ${_CG_ORIG_SRCS})
++  get_filename_component(_fn ${_f} NAME)
++  configure_file(${_f} ${_CG_LOCAL_DIR}/${_fn} COPYONLY)
++endforeach()
++set(_CM_LOCAL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/_cm)
++file(MAKE_DIRECTORY ${_CM_LOCAL_DIR})
++file(GLOB _CM_ORIG_SRCS ${RNSVG_COMMON_DIR}/react/renderer/components/rnsvg/*.cpp ${RNSVG_COMMON_DIR}/react/renderer/components/rnsvg/*.h)
++foreach(_f ${_CM_ORIG_SRCS})
++  get_filename_component(_fn ${_f} NAME)
++  configure_file(${_f} ${_CM_LOCAL_DIR}/${_fn} COPYONLY)
++endforeach()
++
++file(GLOB rnsvg_SRCS CONFIGURE_DEPENDS *.cpp ${_CM_LOCAL_DIR}/*.cpp)
++file(GLOB rnsvg_codegen_SRCS CONFIGURE_DEPENDS ${_CG_LOCAL_DIR}/*.cpp)
+ 
+ add_library(
+   react_codegen_rnsvg
+@@ -21,6 +37,8 @@ target_include_directories(
+   react_codegen_rnsvg
+   PUBLIC
+   .
++  ${_CG_LOCAL_DIR}
++  ${_CM_LOCAL_DIR}
+   ${RNSVG_COMMON_DIR}
+   ${RNSVG_GENERATED_JNI_DIR}
+   ${RNSVG_GENERATED_REACT_DIR}

@@ -1,0 +1,54 @@
+diff --git a/android/build.gradle b/android/build.gradle
+index 1234567..abcdefg 100644
+--- a/android/build.gradle
++++ b/android/build.gradle
+@@ -82,6 +82,22 @@ static def supportsNamespace() {
+
+ def reactNativeRootDir = resolveReactNativeDirectory()
+
++// On Windows, ninja 1.10 (bundled with Android SDK CMake 3.22) cannot
++// handle deeply-nested object dirs that exceed MAX_PATH (260 chars).
++// Create a short junction to common/cpp to keep paths under the limit.
++def commonCppDir = toPlatformFileString(new File(projectDir, "../common/cpp").canonicalPath)
++if (Os.isFamily(Os.FAMILY_WINDOWS)) {
++  def junctionDir = new File(projectDir, "_cpp")
++  if (!junctionDir.exists()) {
++    def target = new File(projectDir, "../common/cpp").canonicalPath
++    def proc = ["cmd", "/c", "mklink", "/J", junctionDir.absolutePath, target].execute()
++    proc.waitFor()
++  }
++  if (junctionDir.exists()) {
++    commonCppDir = toPlatformFileString(junctionDir.absolutePath)
++  }
++}
++
+ def reactProperties = new Properties()
+ file("$reactNativeRootDir/ReactAndroid/gradle.properties").withInputStream { reactProperties.load(it) }
+
+@@ -120,7 +136,8 @@ android {
+                   "-DANDROID_TOOLCHAIN=clang",
+                   "-DREACT_NATIVE_DIR=${toPlatformFileString(reactNativeRootDir.path)}",
+                   "-DIS_NEW_ARCHITECTURE_ENABLED=${IS_NEW_ARCHITECTURE_ENABLED}",
+-                  "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
++                  "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON",
++                  "-DCOMMON_CPP_DIR=${commonCppDir}"
+       }
+     }
+   }
+diff --git a/android/CMakeLists.txt b/android/CMakeLists.txt
+index 1234567..abcdefg 100644
+--- a/android/CMakeLists.txt
++++ b/android/CMakeLists.txt
+@@ -31,7 +31,12 @@ endif()
+
+ set(ANDROID_CPP_DIR "${CMAKE_SOURCE_DIR}/src/main/cpp")
+-set(COMMON_CPP_DIR "${CMAKE_SOURCE_DIR}/../common/cpp")
++
++# COMMON_CPP_DIR may be passed from build.gradle (as a short junction path
++# on Windows to avoid MAX_PATH issues with ninja 1.10).
++# Fall back to the default relative path if not provided.
++if(NOT COMMON_CPP_DIR)
++  set(COMMON_CPP_DIR "${CMAKE_SOURCE_DIR}/../common/cpp")
++endif()
+
+ add_subdirectory("${ANDROID_CPP_DIR}/audioapi")

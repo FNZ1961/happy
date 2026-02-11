@@ -12,14 +12,25 @@
  * 4. PATH fallback: bun, pnpm, or any other package manager
  */
 
-const { execSync } = require('child_process');
+const childProcess = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
 const EXEC_SYNC_TIMEOUT_MS = 5000;
 const WINDOWS_UTF8_GUARD_INTERVAL_MS = 1500;
+const WINDOWS_UTF8_GUARD_ENV_KEY = 'HAPPY_WINDOWS_UTF8_GUARD';
 let windowsUtf8GuardInterval = null;
+
+/**
+ * Toggleable flag for Windows UTF-8 guard loop.
+ * Disabled by default to avoid interfering with interactive terminal UIs.
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {boolean}
+ */
+function isWindowsUtf8GuardEnabled(env = process.env) {
+    return env[WINDOWS_UTF8_GUARD_ENV_KEY] === '1';
+}
 
 /**
  * Force active Windows console code page to UTF-8 (65001).
@@ -27,7 +38,7 @@ let windowsUtf8GuardInterval = null;
 function setWindowsUtf8CodePage() {
     if (process.platform !== 'win32') return;
     try {
-        execSync('chcp 65001 >NUL', {
+        childProcess.execSync('chcp 65001 >NUL', {
             stdio: ['pipe', 'pipe', 'pipe'],
             shell: process.env.ComSpec || 'cmd.exe',
             timeout: EXEC_SYNC_TIMEOUT_MS
@@ -43,6 +54,7 @@ function setWindowsUtf8CodePage() {
  */
 function startWindowsUtf8CodePageGuard() {
     if (process.platform !== 'win32') return () => {};
+    if (!isWindowsUtf8GuardEnabled()) return () => {};
     if (!process.stdin.isTTY || !process.stdout.isTTY) return () => {};
     if (windowsUtf8GuardInterval) {
         return () => {
@@ -158,7 +170,7 @@ function findWindowsGitBashPath(baseEnv = process.env) {
 
     // 3) Derive from where git
     try {
-        const gitPaths = execSync('where git', {
+        const gitPaths = childProcess.execSync('where git', {
             encoding: 'utf8',
             stdio: ['pipe', 'pipe', 'pipe'],
             timeout: EXEC_SYNC_TIMEOUT_MS
@@ -185,7 +197,7 @@ function findWindowsGitBashPath(baseEnv = process.env) {
 
     // 4) Derive from where bash (prefer Git Bash paths only)
     try {
-        const bashPaths = execSync('where bash', {
+        const bashPaths = childProcess.execSync('where bash', {
             encoding: 'utf8',
             stdio: ['pipe', 'pipe', 'pipe'],
             timeout: EXEC_SYNC_TIMEOUT_MS
@@ -214,11 +226,9 @@ function ensureWindowsUtf8Env(baseEnv) {
     const env = { ...baseEnv };
     if (process.platform !== 'win32') return env;
 
-    // Ensure UTF-8 code page for current interactive console.
-    setWindowsUtf8CodePage();
-
-    if (!env.LANG) env.LANG = 'C.UTF-8';
-    if (!env.LC_ALL) env.LC_ALL = 'C.UTF-8';
+    // Avoid mutating active console state during interactive render.
+    // Keep user locale untouched on Windows to prevent width/layout side effects.
+    // Optional codepage guard can still be enabled explicitly when needed.
 
     if (env.CLAUDE_CODE_GIT_BASH_PATH) {
         const normalizedBashPath = path.normalize(env.CLAUDE_CODE_GIT_BASH_PATH);
@@ -241,7 +251,7 @@ function ensureWindowsUtf8Env(baseEnv) {
  */
 function findNpmGlobalCliPath() {
     try {
-        const globalRoot = execSync('npm root -g', {
+        const globalRoot = childProcess.execSync('npm root -g', {
             encoding: 'utf8',
             stdio: ['pipe', 'pipe', 'pipe'],
             timeout: EXEC_SYNC_TIMEOUT_MS
@@ -266,7 +276,7 @@ function findClaudeInPath() {
         // Cross-platform: 'where' on Windows, 'which' on Unix
         const command = process.platform === 'win32' ? 'where claude' : 'which claude';
         // stdio suppression for cleaner execution (from tiann/PR#83)
-        const result = execSync(command, {
+        const result = childProcess.execSync(command, {
             encoding: 'utf8',
             stdio: ['pipe', 'pipe', 'pipe'],
             timeout: EXEC_SYNC_TIMEOUT_MS
@@ -398,7 +408,7 @@ function findBunGlobalCliPath() {
     // First check if bun command exists (cross-platform)
     try {
         const bunCheckCommand = process.platform === 'win32' ? 'where bun' : 'which bun';
-        execSync(bunCheckCommand, {
+        childProcess.execSync(bunCheckCommand, {
             encoding: 'utf8',
             stdio: ['pipe', 'pipe', 'pipe'],
             timeout: EXEC_SYNC_TIMEOUT_MS
@@ -762,5 +772,6 @@ module.exports = {
     findWindowsGitBashPath,
     setWindowsUtf8CodePage,
     startWindowsUtf8CodePageGuard,
+    isWindowsUtf8GuardEnabled,
 };
 

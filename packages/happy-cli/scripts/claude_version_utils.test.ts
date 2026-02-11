@@ -17,7 +17,9 @@ import {
   ensureWindowsUtf8Env,
   runClaudeCli,
   findWindowsGitBashPath,
-  startWindowsUtf8CodePageGuard
+  setWindowsUtf8CodePage,
+  startWindowsUtf8CodePageGuard,
+  isWindowsUtf8GuardEnabled
 } from '../scripts/claude_version_utils.cjs';
 
 describe('Claude Version Utils - Cross-Platform Detection', () => {
@@ -351,6 +353,7 @@ describe('Windows helpers', () => {
 
   afterEach(() => {
     Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true });
+    vi.restoreAllMocks();
   });
 
   it('findWindowsGitBashPath should use explicit env path when it exists', () => {
@@ -432,7 +435,7 @@ describe('Windows helpers', () => {
     expect(next.TEST_ONLY).toBe('1');
   });
 
-  it('ensureWindowsUtf8Env should set UTF-8 locale defaults when absent', () => {
+  it('ensureWindowsUtf8Env should keep locale unset when absent', () => {
     Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
 
     const env = {
@@ -440,8 +443,8 @@ describe('Windows helpers', () => {
     } as NodeJS.ProcessEnv;
 
     const next = ensureWindowsUtf8Env(env);
-    expect(next.LANG).toBe('C.UTF-8');
-    expect(next.LC_ALL).toBe('C.UTF-8');
+    expect(next.LANG).toBeUndefined();
+    expect(next.LC_ALL).toBeUndefined();
   });
 
   it('preferWindowsCliJsPath should keep js path unchanged', () => {
@@ -472,7 +475,7 @@ describe('Windows helpers', () => {
     }
   });
 
-  it('ensureWindowsUtf8Env should preserve existing variables', () => {
+  it('ensureWindowsUtf8Env should preserve existing locale variables', () => {
     Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
 
     const env = {
@@ -488,12 +491,134 @@ describe('Windows helpers', () => {
     expect(next).not.toBe(env);
   });
 
+  it('isWindowsUtf8GuardEnabled should be disabled by default', () => {
+    const prev = process.env.HAPPY_WINDOWS_UTF8_GUARD;
+    delete process.env.HAPPY_WINDOWS_UTF8_GUARD;
+    try {
+      expect(isWindowsUtf8GuardEnabled()).toBe(false);
+    } finally {
+      if (typeof prev === 'string') {
+        process.env.HAPPY_WINDOWS_UTF8_GUARD = prev;
+      } else {
+        delete process.env.HAPPY_WINDOWS_UTF8_GUARD;
+      }
+    }
+  });
+
+  it('isWindowsUtf8GuardEnabled should be enabled with env flag', () => {
+    const prev = process.env.HAPPY_WINDOWS_UTF8_GUARD;
+    process.env.HAPPY_WINDOWS_UTF8_GUARD = '1';
+    try {
+      expect(isWindowsUtf8GuardEnabled()).toBe(true);
+    } finally {
+      if (typeof prev === 'string') {
+        process.env.HAPPY_WINDOWS_UTF8_GUARD = prev;
+      } else {
+        delete process.env.HAPPY_WINDOWS_UTF8_GUARD;
+      }
+    }
+  });
+
   it('startWindowsUtf8CodePageGuard should be a no-op on non-Windows', () => {
     Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
 
     const stop = startWindowsUtf8CodePageGuard();
     expect(typeof stop).toBe('function');
     expect(() => stop()).not.toThrow();
+  });
+
+  it('setWindowsUtf8CodePage should use piped stdio on Windows', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+
+    const require = createRequire(import.meta.url);
+    const childProcessModule = require('child_process');
+    const execSyncSpy = vi.spyOn(childProcessModule, 'execSync').mockReturnValue(Buffer.from(''));
+
+    setWindowsUtf8CodePage();
+
+    expect(execSyncSpy).toHaveBeenCalledTimes(1);
+    expect(execSyncSpy).toHaveBeenCalledWith(
+      'chcp 65001 >NUL',
+      expect.objectContaining({
+        stdio: ['pipe', 'pipe', 'pipe']
+      })
+    );
+  });
+
+  it('startWindowsUtf8CodePageGuard should no-op on Windows when env flag is absent', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+
+    const prev = process.env.HAPPY_WINDOWS_UTF8_GUARD;
+    delete process.env.HAPPY_WINDOWS_UTF8_GUARD;
+
+    const require = createRequire(import.meta.url);
+    const childProcessModule = require('child_process');
+    const execSyncSpy = vi.spyOn(childProcessModule, 'execSync').mockReturnValue(Buffer.from(''));
+
+    const stop = startWindowsUtf8CodePageGuard();
+    try {
+      expect(typeof stop).toBe('function');
+      expect(execSyncSpy).toHaveBeenCalledTimes(0);
+    } finally {
+      stop();
+      if (typeof prev === 'string') {
+        process.env.HAPPY_WINDOWS_UTF8_GUARD = prev;
+      } else {
+        delete process.env.HAPPY_WINDOWS_UTF8_GUARD;
+      }
+    }
+  });
+
+  it('startWindowsUtf8CodePageGuard should schedule chcp on Windows when env flag is set', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+
+    const prev = process.env.HAPPY_WINDOWS_UTF8_GUARD;
+    process.env.HAPPY_WINDOWS_UTF8_GUARD = '1';
+
+    const hadOwnStdinIsTTY = Object.prototype.hasOwnProperty.call(process.stdin, 'isTTY');
+    const hadOwnStdoutIsTTY = Object.prototype.hasOwnProperty.call(process.stdout, 'isTTY');
+    const prevStdinIsTTY = process.stdin.isTTY;
+    const prevStdoutIsTTY = process.stdout.isTTY;
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true, writable: true });
+    Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true, writable: true });
+
+    const require = createRequire(import.meta.url);
+    const childProcessModule = require('child_process');
+    const execSyncSpy = vi.spyOn(childProcessModule, 'execSync').mockReturnValue(Buffer.from(''));
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval').mockImplementation((handler: TimerHandler) => {
+      if (typeof handler === 'function') {
+        handler();
+      }
+      return {
+        unref: vi.fn(),
+      } as unknown as NodeJS.Timeout;
+    });
+    const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval').mockImplementation(() => {});
+
+    const stop = startWindowsUtf8CodePageGuard();
+    try {
+      expect(typeof stop).toBe('function');
+      expect(setIntervalSpy).toHaveBeenCalledTimes(1);
+      expect(execSyncSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      stop();
+      expect(clearIntervalSpy).toHaveBeenCalledTimes(1);
+      if (typeof prev === 'string') {
+        process.env.HAPPY_WINDOWS_UTF8_GUARD = prev;
+      } else {
+        delete process.env.HAPPY_WINDOWS_UTF8_GUARD;
+      }
+      if (hadOwnStdinIsTTY) {
+        Object.defineProperty(process.stdin, 'isTTY', { value: prevStdinIsTTY, configurable: true, writable: true });
+      } else {
+        delete process.stdin.isTTY;
+      }
+      if (hadOwnStdoutIsTTY) {
+        Object.defineProperty(process.stdout, 'isTTY', { value: prevStdoutIsTTY, configurable: true, writable: true });
+      } else {
+        delete process.stdout.isTTY;
+      }
+    }
   });
 });
 

@@ -14,7 +14,9 @@
             "**/react-native",
             "**/react-native/**",
             "**/react-native-edge-to-edge/**",
-            "**/react-native-incall-manager/**"
+            "**/react-native-incall-manager/**",
+            "**/@react-native-community/slider",
+            "**/@react-native-community/slider/**"
         ]
     },
     "packageManager": "yarn@1.22.22"

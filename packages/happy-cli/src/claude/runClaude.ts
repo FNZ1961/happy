@@ -162,21 +162,24 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         logger.debug('[START] Failed to report to daemon (may not be running):', error);
     }
 
-    // Extract SDK metadata in background and update session when ready
-    extractSDKMetadataAsync(async (sdkMetadata) => {
-        logger.debug('[start] SDK metadata extracted, updating session:', sdkMetadata);
-        try {
-            // Update session metadata with tools and slash commands
-            api.sessionSyncClient(response).updateMetadata((currentMetadata) => ({
-                ...currentMetadata,
-                tools: sdkMetadata.tools,
-                slashCommands: sdkMetadata.slashCommands
-            }));
-            logger.debug('[start] Session metadata updated with SDK capabilities');
-        } catch (error) {
-            logger.debug('[start] Failed to update session metadata:', error);
-        }
-    });
+    // Extract SDK metadata in background and update session when ready.
+    // Skip in local-start mode to avoid competing global Claude process touching terminal state on Windows.
+    if (options.startingMode === 'remote') {
+        extractSDKMetadataAsync(async (sdkMetadata) => {
+            logger.debug('[start] SDK metadata extracted, updating session:', sdkMetadata);
+            try {
+                // Update session metadata with tools and slash commands
+                api.sessionSyncClient(response).updateMetadata((currentMetadata) => ({
+                    ...currentMetadata,
+                    tools: sdkMetadata.tools,
+                    slashCommands: sdkMetadata.slashCommands
+                }));
+                logger.debug('[start] Session metadata updated with SDK capabilities');
+            } catch (error) {
+                logger.debug('[start] Failed to update session metadata:', error);
+            }
+        });
+    }
 
     // Create realtime session
     const session = api.sessionSyncClient(response);
